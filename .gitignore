@@ -1,3 +1,29 @@
+# Byte-compiled / optimized / DLL files
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
 .DS_Store
+
+# pytest
+.pytest_cache/
+.coverage
+
+# Distribution / packaging
+*.egg-info/
+dist/
+build/
+
+# Local configuration
+.claude/settings.local.json

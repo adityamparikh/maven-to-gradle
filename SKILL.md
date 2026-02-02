@@ -90,7 +90,7 @@ See `references/profiles.md` for complete patterns:
 ## Step 5: Verify
 
 ```bash
-gradle wrapper
+gradle wrapper --gradle-version=8.12
 ./gradlew build
 ./gradlew dependencies  # compare with: mvn dependency:tree
 ```
