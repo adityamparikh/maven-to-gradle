@@ -99,6 +99,38 @@ python3 scripts/migrate.py /path/to/maven-project --output /path/to/output
 | [Gotchas](references/gotchas.md) | Scope mapping, resource filtering, test config, Kotlin issues |
 | [Dual Build](references/dual-build.md) | Running Maven and Gradle side by side: sync strategies, CI setup |
 
+## FAQ
+
+**Q: Does the generated output build immediately without any manual edits?**
+A: For simple single-module projects it often does. For multi-module projects or those with custom plugins, expect to make manual adjustments — particularly for inter-module `project(":module")` dependencies, which the script cannot infer from POM files alone.
+
+**Q: What's the difference between "migrate" and "overlay" mode?**
+A: **Migrate** mode generates Gradle files with the expectation that you'll remove `pom.xml` files after verifying the build. **Overlay** mode adds Gradle alongside Maven so both build systems work simultaneously — useful for gradual migration or teams that need to keep Maven during a transition period. Overlay mode also manages `.gitignore` entries for Gradle build artifacts.
+
+**Q: How does the script handle Spring Boot parent POM?**
+A: It converts `spring-boot-starter-parent` into the `org.springframework.boot` and `io.spring.dependency-management` Gradle plugins, and moves the Spring Boot version into the version catalog. The Spring Boot dependency management plugin handles BOM resolution the same way the parent POM did in Maven.
+
+**Q: What happens with Maven profiles?**
+A: The script detects profiles and adds comments in the generated build files identifying each one (including activation type and any profile-specific dependencies or plugins). You need to convert them manually — see [references/profiles.md](references/profiles.md) for Gradle equivalents of every activation type.
+
+**Q: Can I use this without Claude Code, as a standalone script?**
+A: Yes. The migration script is plain Python 3.9+ with no third-party dependencies. Run `python3 scripts/migrate.py /path/to/project --dry-run` to preview output, then drop the `--dry-run` flag to write files. See [Standalone Script Usage](#standalone-script-usage) above.
+
+**Q: How are Maven scopes mapped to Gradle configurations?**
+A: `compile` → `implementation`, `provided` → `compileOnly`, `runtime` → `runtimeOnly`, `test` → `testImplementation`, `system` → `compileOnly`. Annotation processors (Lombok, MapStruct, etc.) are additionally wired to the `annotationProcessor` configuration.
+
+**Q: Does the script handle nested multi-module projects?**
+A: Yes. It recursively parses `<modules>` declarations, so a parent with a mid-level aggregator that itself declares child modules will produce build files for all levels. Circular module references are detected and handled.
+
+**Q: What if a Maven plugin has no Gradle equivalent?**
+A: The script checks a mapping table of common plugins. Known plugins are converted to their Gradle equivalents. Unknown plugins are skipped with a logged warning — you'll need to find or write a Gradle equivalent manually. See [references/plugin-mappings.md](references/plugin-mappings.md) for the full mapping table.
+
+**Q: Why Gradle Kotlin DSL instead of Groovy DSL?**
+A: Kotlin DSL (`build.gradle.kts`) provides compile-time type checking, better IDE auto-completion, and is the default for new Gradle projects. It's the direction Gradle is heading. The version catalog (`libs.versions.toml`) is format-agnostic and works with both DSLs.
+
+**Q: How do I run the tests?**
+A: From the `scripts/` directory: `python -m pytest tests/ -v`. The test suite has 192 tests with 100% statement coverage across all source modules. The only dependency is `pytest` (install via `pip install pytest`).
+
 ## Requirements
 
 - Python 3.9+ (for the migration script — uses only stdlib)
