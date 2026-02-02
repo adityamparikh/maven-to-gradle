@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Maven to Gradle KTS + Version Catalogs migration script.
 
-Parses Maven pom.xml files (single or multi-module) and generates:
-  - gradle/libs.versions.toml (version catalog)
-  - settings.gradle.kts
-  - build.gradle.kts (root and per-module)
+Parses Maven pom.xml files (single or multi-module) and generates Gradle Kotlin
+DSL build files with a centralized version catalog.
+
+Generated files:
+    - gradle/libs.versions.toml  — version catalog with dependencies, BOMs, plugins
+    - settings.gradle.kts        — project name, module includes, repository config
+    - build.gradle.kts           — root build file (and per-module for multi-module)
+    - gradle.properties          — Gradle daemon, parallelism, caching settings
 
 Usage:
     python migrate.py <path-to-maven-project> [--output <output-dir>] [--dry-run]
@@ -19,7 +23,6 @@ If --dry-run is given, outputs are printed to stdout instead of written.
 """
 
 import argparse
-import os
 import re
 import sys
 import xml.etree.ElementTree as ET
@@ -28,6 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+# XML namespace used by Maven POM files (POM model version 4.0.0).
 NS = {"m": "http://maven.apache.org/POM/4.0.0"}
 
 
@@ -35,6 +39,21 @@ NS = {"m": "http://maven.apache.org/POM/4.0.0"}
 
 @dataclass
 class Dependency:
+    """A Maven ``<dependency>`` element.
+
+    Captures the full GAV (group, artifact, version) coordinates along with
+    scope, classifier, type, optional flag, and exclusion list.
+
+    Attributes:
+        group_id: Maven groupId (e.g. ``org.springframework.boot``).
+        artifact_id: Maven artifactId (e.g. ``spring-boot-starter-web``).
+        version: Explicit version string, or ``None`` if managed by a BOM.
+        scope: Maven scope — one of compile, provided, runtime, test, system, import.
+        classifier: Optional classifier (e.g. ``sources``, ``tests``).
+        dep_type: Optional packaging type (e.g. ``pom`` for BOM imports).
+        optional: Whether the dependency is marked ``<optional>true</optional>``.
+        exclusions: List of ``(groupId, artifactId)`` tuples to exclude.
+    """
     group_id: str
     artifact_id: str
     version: Optional[str] = None
@@ -47,6 +66,15 @@ class Dependency:
 
 @dataclass
 class Plugin:
+    """A Maven ``<plugin>`` element.
+
+    Attributes:
+        group_id: Plugin groupId (defaults to ``org.apache.maven.plugins``).
+        artifact_id: Plugin artifactId (e.g. ``maven-compiler-plugin``).
+        version: Explicit version, or ``None`` if inherited from pluginManagement.
+        configuration: Flattened ``<configuration>`` block as a nested dict.
+        executions: Raw execution elements (currently unused, reserved for future).
+    """
     group_id: str
     artifact_id: str
     version: Optional[str] = None
@@ -56,6 +84,19 @@ class Plugin:
 
 @dataclass
 class MavenProfile:
+    """A Maven ``<profile>`` element.
+
+    Profiles are recorded but not automatically converted to Gradle logic.
+    Instead, the generator emits comment hints in build.gradle.kts pointing
+    to the profiles reference documentation.
+
+    Attributes:
+        profile_id: The ``<id>`` of the profile.
+        activation: Parsed activation conditions (activeByDefault, jdk, property, os).
+        dependencies: Dependencies declared within the profile.
+        plugins: Plugins declared within the profile.
+        properties: Properties declared within the profile.
+    """
     profile_id: str
     activation: dict = field(default_factory=dict)
     dependencies: list = field(default_factory=list)
@@ -65,6 +106,31 @@ class MavenProfile:
 
 @dataclass
 class MavenModule:
+    """Central parse result for a single ``pom.xml`` file.
+
+    Represents both root and child modules. For multi-module projects, the
+    root module has ``packaging="pom"`` and a non-empty ``modules`` list.
+
+    Attributes:
+        group_id: Maven groupId (inherited from parent if not declared).
+        artifact_id: Maven artifactId.
+        version: Version string (inherited from parent if not declared).
+        packaging: Packaging type — jar, pom, or war.
+        name: Human-readable ``<name>`` element.
+        description: ``<description>`` element.
+        parent_artifact_id: Parent POM artifactId, if any.
+        parent_group_id: Parent POM groupId, if any.
+        parent_version: Parent POM version, if any.
+        properties: Merged ``<properties>`` dict.
+        dependencies: Direct ``<dependencies>`` list.
+        dep_management: ``<dependencyManagement>`` dependencies (BOMs and managed deps).
+        plugins: ``<build><plugins>`` list.
+        plugin_management: ``<build><pluginManagement><plugins>`` list.
+        profiles: ``<profiles>`` list.
+        modules: Child module directory names from ``<modules>``.
+        repositories: List of ``(id, url)`` tuples from ``<repositories>``.
+        source_dir: Relative filesystem path for multi-module (set by the orchestrator).
+    """
     group_id: str
     artifact_id: str
     version: Optional[str] = None
@@ -80,14 +146,24 @@ class MavenModule:
     plugins: list = field(default_factory=list)
     plugin_management: list = field(default_factory=list)
     profiles: list = field(default_factory=list)
-    modules: list = field(default_factory=list)  # child module directory names
-    source_dir: Optional[str] = None  # relative path for multi-module
+    modules: list = field(default_factory=list)
+    repositories: list = field(default_factory=list)
+    source_dir: Optional[str] = None
 
 
 # ── POM parsing ───────────────────────────────────────────────────────────────
 
 def _find(el, tag, ns=NS):
-    """Find a child element, trying with and without namespace."""
+    """Find a direct child XML element, trying with and without the Maven namespace.
+
+    Args:
+        el: Parent XML element to search within.
+        tag: Tag name to look for (without namespace prefix).
+        ns: Namespace mapping (defaults to Maven POM 4.0.0).
+
+    Returns:
+        The first matching child element, or ``None`` if not found.
+    """
     result = el.find(f"m:{tag}", ns)
     if result is not None:
         return result
@@ -98,7 +174,16 @@ def _find(el, tag, ns=NS):
 
 
 def _text(el, tag, ns=NS):
-    """Get text of a child element, or None."""
+    """Extract the text content of a child element.
+
+    Args:
+        el: Parent XML element.
+        tag: Tag name of the child element.
+        ns: Namespace mapping.
+
+    Returns:
+        Stripped text content, or ``None`` if the element doesn't exist or is empty.
+    """
     child = _find(el, tag, ns)
     if child is not None and child.text:
         return child.text.strip()
@@ -106,6 +191,16 @@ def _text(el, tag, ns=NS):
 
 
 def _parse_dependency(dep_el) -> Dependency:
+    """Parse a ``<dependency>`` XML element into a Dependency dataclass.
+
+    Extracts scope, optional flag, and any ``<exclusions>`` children.
+
+    Args:
+        dep_el: The ``<dependency>`` XML element.
+
+    Returns:
+        A populated Dependency instance.
+    """
     scope = _text(dep_el, "scope") or "compile"
     optional_text = _text(dep_el, "optional")
     optional = optional_text and optional_text.lower() == "true"
@@ -130,7 +225,18 @@ def _parse_dependency(dep_el) -> Dependency:
 
 
 def _parse_plugin_config(config_el) -> dict:
-    """Flatten plugin <configuration> into a dict."""
+    """Recursively flatten a plugin ``<configuration>`` block into a Python dict.
+
+    Nested elements with children become sub-dicts or lists of strings.
+    Leaf elements become string values keyed by their tag name.
+
+    Args:
+        config_el: The ``<configuration>`` XML element, or ``None``.
+
+    Returns:
+        A dict mapping tag names to string values, lists, or nested dicts.
+        Returns an empty dict if config_el is ``None``.
+    """
     if config_el is None:
         return {}
     result = {}
@@ -152,6 +258,15 @@ def _parse_plugin_config(config_el) -> dict:
 
 
 def _parse_plugin(plugin_el) -> Plugin:
+    """Parse a ``<plugin>`` XML element into a Plugin dataclass.
+
+    Args:
+        plugin_el: The ``<plugin>`` XML element.
+
+    Returns:
+        A populated Plugin instance. If groupId is absent, defaults to
+        ``org.apache.maven.plugins``.
+    """
     config_el = _find(plugin_el, "configuration")
     return Plugin(
         group_id=_text(plugin_el, "groupId") or "org.apache.maven.plugins",
@@ -162,6 +277,17 @@ def _parse_plugin(plugin_el) -> Plugin:
 
 
 def _parse_profile(profile_el) -> MavenProfile:
+    """Parse a ``<profile>`` XML element into a MavenProfile dataclass.
+
+    Extracts activation conditions (activeByDefault, jdk, property, os),
+    profile-scoped dependencies, plugins, and properties.
+
+    Args:
+        profile_el: The ``<profile>`` XML element.
+
+    Returns:
+        A populated MavenProfile instance.
+    """
     pid = _text(profile_el, "id") or "default"
     activation = {}
     act_el = _find(profile_el, "activation")
@@ -217,7 +343,19 @@ def _parse_profile(profile_el) -> MavenProfile:
 
 
 def parse_pom(pom_path: Path) -> MavenModule:
-    """Parse a pom.xml into a MavenModule."""
+    """Parse a ``pom.xml`` file into a MavenModule.
+
+    Handles both namespaced and non-namespaced POM files. Extracts parent
+    info, properties, dependencies, dependency management, plugins, plugin
+    management, profiles, modules, and repositories.
+
+    Args:
+        pom_path: Filesystem path to the pom.xml file.
+
+    Returns:
+        A fully populated MavenModule instance. Fields not present in the
+        POM (e.g. groupId) are inherited from the parent if available.
+    """
     tree = ET.parse(pom_path)
     root = tree.getroot()
 
@@ -290,6 +428,16 @@ def parse_pom(pom_path: Path) -> MavenModule:
             if mod_el.text:
                 modules.append(mod_el.text.strip())
 
+    # Repositories
+    repositories = []
+    repos_el = _find(root, "repositories")
+    if repos_el is not None:
+        for repo_el in list(repos_el.findall("m:repository", NS)) + list(repos_el.findall("repository")):
+            repo_id = _text(repo_el, "id")
+            repo_url = _text(repo_el, "url")
+            if repo_url:
+                repositories.append((repo_id or "unknown", repo_url))
+
     return MavenModule(
         group_id=group_id,
         artifact_id=artifact_id,
@@ -307,52 +455,111 @@ def parse_pom(pom_path: Path) -> MavenModule:
         plugin_management=plugin_management,
         profiles=profiles,
         modules=modules,
+        repositories=repositories,
     )
 
 
 # ── Catalog alias generation ─────────────────────────────────────────────────
 
 def _to_alias(group_id: str, artifact_id: str) -> str:
-    """Generate a version catalog alias from Maven coordinates.
+    """Generate a Gradle version catalog alias from Maven GAV coordinates.
 
-    Follows Gradle convention: segments separated by hyphens,
-    with common prefixes collapsed for readability.
+    Uses a ``prefix_map`` to collapse common groupId prefixes into short,
+    idiomatic catalog aliases. For example:
+
+        org.springframework.boot : spring-boot-starter-web → spring-boot-starter-web
+        org.testcontainers       : testcontainers-postgresql → testcontainers-postgresql
+        io.awspring.cloud        : spring-cloud-aws-starter-s3 → spring-cloud-aws-starter-s3
+
+    The prefix_map is ordered with more-specific prefixes before less-specific
+    ones (e.g. ``io.micronaut.data`` before ``io.micronaut``) because matching
+    uses ``str.startswith()`` with first-match-wins semantics.
+
+    Anti-stutter logic prevents aliases like ``spring-boot-spring-boot-starter-web``
+    by detecting when the artifact_id already starts with the prefix words.
+
+    Args:
+        group_id: Maven groupId.
+        artifact_id: Maven artifactId.
+
+    Returns:
+        A sanitized kebab-case alias string suitable for ``libs.versions.toml``.
     """
-    # Common group prefixes to strip for cleaner aliases
+    # Common group prefixes to strip for cleaner aliases.
+    # ORDERING MATTERS: more-specific prefixes must come before less-specific
+    # ones because matching uses startswith() with first-match-wins.
     prefix_map = {
+        # Spring ecosystem
         "org.springframework.boot": "spring-boot",
         "org.springframework.cloud": "spring-cloud",
         "org.springframework.data": "spring-data",
         "org.springframework.security": "spring-security",
         "org.springframework.kafka": "spring-kafka",
         "org.springframework": "spring",
+        "io.awspring.cloud": "spring-cloud-aws",
+        # Apache
         "org.apache.commons": "commons",
         "org.apache.kafka": "kafka",
         "org.apache.solr": "solr",
         "org.apache.lucene": "lucene",
         "org.apache.httpcomponents": "httpcomponents",
         "org.apache.logging.log4j": "log4j",
+        # Jackson
         "com.fasterxml.jackson.core": "jackson",
         "com.fasterxml.jackson.module": "jackson-module",
         "com.fasterxml.jackson.datatype": "jackson-datatype",
         "com.fasterxml.jackson.dataformat": "jackson-dataformat",
+        # Reactive / observability
         "io.projectreactor": "reactor",
         "io.micrometer": "micrometer",
+        # Quarkus (more-specific before less-specific)
+        "io.quarkus.platform": "quarkus-platform",
+        "io.quarkus": "quarkus",
+        # Micronaut (more-specific before less-specific)
+        "io.micronaut.data": "micronaut-data",
+        "io.micronaut.sql": "micronaut-sql",
+        "io.micronaut.serde": "micronaut-serde",
+        "io.micronaut.test": "micronaut-test",
+        "io.micronaut.testresources": "micronaut-testresources",
+        "io.micronaut.flyway": "micronaut-flyway",
+        "io.micronaut.validation": "micronaut-validation",
+        "io.micronaut": "micronaut",
+        # Networking / gRPC
+        "io.grpc": "grpc",
+        "io.netty": "netty",
+        # Resilience
+        "io.github.resilience4j": "resilience4j",
+        # Testing
         "org.junit.jupiter": "junit-jupiter",
         "org.mockito": "mockito",
         "org.assertj": "assertj",
         "org.testcontainers": "testcontainers",
+        "org.mock-server": "mockserver",
+        "org.wiremock": "wiremock",
+        "com.github.tomakehurst": "wiremock",
+        "org.awaitility": "awaitility",
+        # Logging
         "ch.qos.logback": "logback",
         "org.slf4j": "slf4j",
-        "org.projectlombok": "lombok",
-        "com.google.guava": "guava",
-        "com.google.cloud.tools": "google-cloud-tools",
-        "com.h2database": "h2",
+        # ORM / database
+        "org.hibernate.orm": "hibernate",
+        "org.hibernate.validator": "hibernate-validator",
+        "org.mongodb": "mongodb",
         "org.postgresql": "postgresql",
+        "com.h2database": "h2",
         "com.mysql": "mysql",
         "org.flywaydb": "flyway",
         "org.liquibase": "liquibase",
+        "redis.clients": "redis",
+        # AWS
+        "software.amazon.awssdk": "aws",
+        "com.amazonaws": "aws-classic",
+        # Build / annotation processing
+        "org.projectlombok": "lombok",
         "org.mapstruct": "mapstruct",
+        "com.google.guava": "guava",
+        "com.google.cloud.tools": "google-cloud-tools",
+        # Jakarta / Javax
         "jakarta.": "jakarta",
         "javax.": "javax",
     }
@@ -400,13 +607,34 @@ def _to_alias(group_id: str, artifact_id: str) -> str:
 
 
 def _to_version_key(name: str) -> str:
-    """Generate a version reference key."""
+    """Sanitize a name into a kebab-case version reference key.
+
+    Replaces non-alphanumeric characters (except hyphens) with hyphens,
+    collapses runs of hyphens, and lowercases.
+
+    Args:
+        name: Raw name string to sanitize.
+
+    Returns:
+        A clean kebab-case key suitable for the ``[versions]`` section.
+    """
     return re.sub(r"[^a-zA-Z0-9\-]", "-", name).strip("-").lower()
 
 
 def _to_plugin_alias(group_id: str, artifact_id: str) -> str:
-    """Generate a plugin alias for version catalog."""
-    # Strip common suffixes (longer suffixes first to avoid partial matches)
+    """Generate a plugin alias for the version catalog ``[plugins]`` section.
+
+    Strips common Maven/Gradle plugin suffixes (``-maven-plugin``,
+    ``-gradle-plugin``, ``-plugin``) before delegating to ``_to_alias()``.
+    Longer suffixes are checked first to avoid partial matches.
+
+    Args:
+        group_id: Plugin groupId.
+        artifact_id: Plugin artifactId.
+
+    Returns:
+        A sanitized plugin alias string.
+    """
     name = artifact_id
     for suffix in ["-gradle-plugin", "-maven-plugin", "-plugin"]:
         if name.endswith(suffix):
@@ -416,6 +644,9 @@ def _to_plugin_alias(group_id: str, artifact_id: str) -> str:
 
 # ── Version catalog generation ────────────────────────────────────────────────
 
+# Maven scope → Gradle configuration mapping.
+# Key difference: Maven's "compile" is transitive; Gradle's "implementation" is NOT.
+# Use the `java-library` plugin and `api` configuration when transitivity is needed.
 SCOPE_MAP = {
     "compile": "implementation",
     "provided": "compileOnly",
@@ -425,7 +656,9 @@ SCOPE_MAP = {
     "import": "platform",
 }
 
-# Known Maven plugin → Gradle plugin ID mapping
+# Known Maven plugin → Gradle plugin ID mapping.
+# Plugins not in this map and not in PLUGIN_SKIP are silently skipped with no
+# catalog entry. Add new mappings here when supporting additional plugins.
 PLUGIN_ID_MAP = {
     "spring-boot-maven-plugin": "org.springframework.boot",
     "kotlin-maven-plugin": "org.jetbrains.kotlin.jvm",
@@ -449,7 +682,9 @@ PLUGIN_ID_MAP = {
     "git-commit-id-plugin": "com.gorylenko.gradle-git-properties",
 }
 
-# Plugins that have no direct Gradle equivalent or are handled differently
+# Maven plugins that have no direct Gradle plugin equivalent.
+# These are handled via built-in Gradle tasks, conventions, or are unnecessary.
+# Each entry documents the Gradle alternative as an inline comment.
 PLUGIN_SKIP = {
     "maven-compiler-plugin",        # → java toolchain / kotlin options
     "maven-surefire-plugin",        # → test task config
@@ -472,9 +707,31 @@ PLUGIN_SKIP = {
 }
 
 
-def _resolve_property(value: str, properties: dict) -> Optional[str]:
-    """Resolve ${property} references."""
-    if not value:
+def _resolve_property(value: str, properties: dict, _depth: int = 0) -> Optional[str]:
+    """Resolve ``${property}`` references against a properties dict.
+
+    Only resolves values that are entirely a single ``${...}`` reference
+    (anchored regex). Concatenated values like ``${prefix}/${suffix}`` are
+    returned unchanged — this is intentional and documented as a known
+    limitation.
+
+    Supports chained resolution: if the resolved value is itself a ``${...}``
+    reference, recursion follows the chain up to a maximum depth of 10 to
+    guard against circular references.
+
+    Also tries stripping the ``project.`` prefix for Maven's ``${project.version}``
+    style properties.
+
+    Args:
+        value: The string potentially containing a ``${property}`` reference.
+        properties: Merged property dict from all parsed Maven modules.
+        _depth: Internal recursion counter (callers should not set this).
+
+    Returns:
+        The resolved value string, or the original value if unresolvable.
+        Returns ``None`` if value is ``None``.
+    """
+    if not value or _depth > 10:
         return value
     match = re.match(r"^\$\{(.+?)\}$", value)
     if match:
@@ -482,13 +739,28 @@ def _resolve_property(value: str, properties: dict) -> Optional[str]:
         # Check direct properties and project.* variants
         for key in [prop_name, prop_name.replace("project.", "")]:
             if key in properties:
-                return properties[key]
+                resolved = properties[key]
+                # Follow chains: ${foo} → ${bar} → "1.0"
+                if resolved and "${" in resolved:
+                    return _resolve_property(resolved, properties, _depth + 1)
+                return resolved
     return value
 
 
 def _detect_java_version(properties: dict, plugins: list) -> Optional[str]:
-    """Extract Java version from properties or compiler plugin config."""
-    # Common property names for Java version
+    """Extract the target Java version from Maven properties or compiler plugin config.
+
+    Checks common property names in order of preference, then falls back to
+    inspecting the ``maven-compiler-plugin`` ``<configuration>`` block.
+    Normalizes legacy ``1.x`` format to just ``x`` (e.g. ``1.8`` → ``8``).
+
+    Args:
+        properties: Merged properties dict from all modules.
+        plugins: Combined list of plugins and pluginManagement entries.
+
+    Returns:
+        Java version string (e.g. ``"21"``), or ``None`` if not detected.
+    """
     for prop_name in [
         "java.version", "maven.compiler.release", "maven.compiler.source",
         "maven.compiler.target", "jdk.version", "java.source.version",
@@ -513,7 +785,18 @@ def _detect_java_version(properties: dict, plugins: list) -> Optional[str]:
 
 
 def _detect_kotlin_version(properties: dict, plugins: list) -> Optional[str]:
-    """Detect if project uses Kotlin and extract version."""
+    """Detect if the project uses Kotlin and extract its version.
+
+    Checks for ``kotlin-maven-plugin`` in the plugins list first, then
+    falls back to ``kotlin.version`` or ``kotlin-version`` properties.
+
+    Args:
+        properties: Merged properties dict.
+        plugins: Combined plugins and pluginManagement entries.
+
+    Returns:
+        Kotlin version string (e.g. ``"2.2.10"``), or ``None`` if not a Kotlin project.
+    """
     for p in plugins:
         if p.artifact_id == "kotlin-maven-plugin":
             if p.version:
@@ -525,12 +808,32 @@ def _detect_kotlin_version(properties: dict, plugins: list) -> Optional[str]:
 
 
 def _is_spring_boot_project(module: MavenModule) -> bool:
+    """Check whether the module is a Spring Boot project.
+
+    Detection checks:
+        1. Parent POM is ``spring-boot-starter-parent``
+        2. ``spring-boot-maven-plugin`` is in plugins or pluginManagement
+
+    Args:
+        module: The root MavenModule to check.
+
+    Returns:
+        ``True`` if Spring Boot is detected.
+    """
     return module.parent_artifact_id == "spring-boot-starter-parent" or any(
         p.artifact_id == "spring-boot-maven-plugin" for p in module.plugins + module.plugin_management
     )
 
 
 def _is_bom_import(dep: Dependency) -> bool:
+    """Check whether a dependency is a BOM import (``type=pom``, ``scope=import``).
+
+    Args:
+        dep: The dependency to check.
+
+    Returns:
+        ``True`` if this is a BOM import in ``<dependencyManagement>``.
+    """
     return dep.dep_type == "pom" and dep.scope == "import"
 
 
@@ -538,7 +841,23 @@ def build_version_catalog(
     root_module: MavenModule,
     child_modules: list[MavenModule],
 ) -> str:
-    """Build a libs.versions.toml content string."""
+    """Build a ``libs.versions.toml`` content string from parsed Maven modules.
+
+    Produces three TOML sections:
+        - ``[versions]``  — version constants (Spring Boot, Java, Kotlin, etc.)
+        - ``[libraries]`` — dependency aliases with group/name/version.ref
+        - ``[plugins]``   — Gradle plugin aliases with id/version.ref
+
+    Dependencies with unresolvable ``${...}`` versions are commented out with
+    a ``# TODO`` marker instead of producing invalid TOML.
+
+    Args:
+        root_module: The parsed root pom.xml module.
+        child_modules: List of parsed child module pom.xml files.
+
+    Returns:
+        A complete ``libs.versions.toml`` file content as a string.
+    """
     all_modules = [root_module] + child_modules
     all_properties = dict(root_module.properties)
     for m in child_modules:
@@ -583,12 +902,19 @@ def build_version_catalog(
                 seen_libs.add(coord)
                 alias = _to_alias(dep.group_id, dep.artifact_id)
                 ver = _resolve_property(dep.version, all_properties) if dep.version else None
-                if ver:
+                if ver and ver.startswith("$"):
+                    # Unresolvable property — comment out to avoid invalid TOML
+                    print(f"WARNING: Could not resolve version '{dep.version}' for "
+                          f"{dep.group_id}:{dep.artifact_id}, commenting out in catalog",
+                          file=sys.stderr)
+                    libraries[alias] = (
+                        f'# {{ group = "{dep.group_id}", name = "{dep.artifact_id}" }}'
+                        f"  # TODO: resolve version from {dep.version}"
+                    )
+                elif ver:
                     vref = _to_version_key(alias)
                     versions[vref] = ver
                     libraries[alias] = f'{{ group = "{dep.group_id}", name = "{dep.artifact_id}", version.ref = "{vref}" }}'
-                elif dep.version and dep.version.startswith("${"):
-                    libraries[alias] = f'{{ group = "{dep.group_id}", name = "{dep.artifact_id}", version = "{dep.version}" }}'
                 else:
                     libraries[alias] = f'{{ group = "{dep.group_id}", name = "{dep.artifact_id}" }}'
 
@@ -619,7 +945,16 @@ def build_version_catalog(
             elif coord in managed_versions:
                 ver = managed_versions[coord]
 
-            if ver and not ver.startswith("$"):
+            if ver and ver.startswith("$"):
+                # Unresolvable property — comment out
+                print(f"WARNING: Could not resolve version '{ver}' for "
+                      f"{dep.group_id}:{dep.artifact_id}, commenting out in catalog",
+                      file=sys.stderr)
+                libraries[alias] = (
+                    f'# {{ group = "{dep.group_id}", name = "{dep.artifact_id}" }}'
+                    f"  # TODO: resolve version from {ver}"
+                )
+            elif ver:
                 vref = _to_version_key(alias)
                 # Deduplicate version refs if same version already tracked
                 existing_vref = None
@@ -639,7 +974,9 @@ def build_version_catalog(
     # ── Collect plugins ──
     if is_boot:
         plugins_section["spring-boot"] = f'{{ id = "org.springframework.boot", version.ref = "spring-boot" }}'
-        plugins_section["spring-dependency-management"] = '{ id = "io.spring.dependency-management", version = "1.1.7" }'
+        # spring-dependency-management version is a Gradle-only concept — omit
+        # version to let the Spring Boot plugin manage compatibility
+        plugins_section["spring-dependency-management"] = '{ id = "io.spring.dependency-management" }'
         seen_plugins.add("spring-boot-maven-plugin")
 
     if kotlin_ver:
@@ -657,7 +994,12 @@ def build_version_catalog(
                 continue
             alias = _to_plugin_alias(p.group_id, p.artifact_id)
             ver = _resolve_property(p.version, all_properties) if p.version else None
-            if ver and not ver.startswith("$"):
+            if ver and ver.startswith("$"):
+                print(f"WARNING: Could not resolve plugin version '{p.version}' for "
+                      f"{p.artifact_id}, omitting version in catalog",
+                      file=sys.stderr)
+                plugins_section[alias] = f'{{ id = "{gradle_id}" }}'
+            elif ver:
                 vref = _to_version_key(alias)
                 versions[vref] = ver
                 plugins_section[alias] = f'{{ id = "{gradle_id}", version.ref = "{vref}" }}'
@@ -687,11 +1029,32 @@ def build_version_catalog(
 # ── build.gradle.kts generation ───────────────────────────────────────────────
 
 def _gradle_config(scope: str) -> str:
+    """Map a Maven dependency scope to the corresponding Gradle configuration.
+
+    Args:
+        scope: Maven scope string (compile, provided, runtime, test, system, import).
+
+    Returns:
+        Gradle configuration name (e.g. ``"implementation"``, ``"testImplementation"``).
+        Defaults to ``"implementation"`` for unknown scopes.
+    """
     return SCOPE_MAP.get(scope, "implementation")
 
 
 def _is_inter_module_dep(dep: Dependency, root_module: MavenModule, child_modules: list) -> Optional[str]:
-    """Check if a dependency is an inter-module reference. Returns module dir name or None."""
+    """Check if a dependency refers to another module in the same multi-module project.
+
+    Matches by artifactId + groupId against the root and all child modules.
+
+    Args:
+        dep: The dependency to check.
+        root_module: The root MavenModule.
+        child_modules: List of child MavenModule instances.
+
+    Returns:
+        The module's source directory name if it's an inter-module dependency,
+        or ``None`` if it's an external dependency.
+    """
     all_artifact_ids = {root_module.artifact_id: "."}
     for cm in child_modules:
         all_artifact_ids[cm.artifact_id] = cm.source_dir or cm.artifact_id
@@ -701,6 +1064,16 @@ def _is_inter_module_dep(dep: Dependency, root_module: MavenModule, child_module
 
 
 def _is_devtools(dep: Dependency) -> bool:
+    """Check if a dependency is Spring Boot DevTools.
+
+    DevTools should use the ``developmentOnly`` configuration in Gradle.
+
+    Args:
+        dep: The dependency to check.
+
+    Returns:
+        ``True`` if the artifactId is ``spring-boot-devtools``.
+    """
     return dep.artifact_id == "spring-boot-devtools"
 
 
@@ -712,7 +1085,24 @@ def generate_build_gradle_kts(
     is_multi_module: bool = False,
     child_modules: list = None,
 ) -> str:
-    """Generate build.gradle.kts content for a module."""
+    """Generate ``build.gradle.kts`` content for a single module.
+
+    Produces a complete build file including plugins, group/version, Java
+    toolchain, Kotlin compiler options, configurations, repositories,
+    dependencies, allprojects/subprojects blocks, test config, and profile
+    conversion hints.
+
+    Args:
+        module: The MavenModule to generate a build file for.
+        root_module: The root MavenModule (used for Spring Boot detection, etc.).
+        catalog_aliases: Mapping of ``(groupId, artifactId)`` → catalog alias.
+        is_root: Whether this is the root module.
+        is_multi_module: Whether the project is multi-module.
+        child_modules: List of child MavenModule instances (for inter-module deps).
+
+    Returns:
+        Complete ``build.gradle.kts`` file content as a string.
+    """
     lines = []
     all_properties = dict(root_module.properties)
     all_properties.update(module.properties)
@@ -865,9 +1255,14 @@ def generate_build_gradle_kts(
 
             if is_apt:
                 dep_ref = f"libs.{safe_alias}"
-                if dep.scope == "provided" or dep.optional:
-                    lines.append(f"    compileOnly({dep_ref})")
-                lines.append(f"    annotationProcessor({dep_ref})")
+                if dep.scope == "test":
+                    # Test-only annotation processor
+                    lines.append(f"    testCompileOnly({dep_ref})")
+                    lines.append(f"    testAnnotationProcessor({dep_ref})")
+                else:
+                    if dep.scope == "provided" or dep.optional:
+                        lines.append(f"    compileOnly({dep_ref})")
+                    lines.append(f"    annotationProcessor({dep_ref})")
             elif dep.exclusions:
                 lines.append(f"    {config}(libs.{safe_alias}) {{")
                 for eg, ea in dep.exclusions:
@@ -878,7 +1273,6 @@ def generate_build_gradle_kts(
                     config = "compileOnly"
                 lines.append(f"    {config}(libs.{safe_alias})")
 
-        # Inter-module dependencies (for child modules referencing siblings)
         lines.append("}")
         lines.append("")
 
@@ -930,17 +1324,79 @@ def generate_build_gradle_kts(
 
 # ── settings.gradle.kts generation ────────────────────────────────────────────
 
-def generate_settings_gradle_kts(root_module: MavenModule) -> str:
+def generate_settings_gradle_kts(
+    root_module: MavenModule,
+    child_modules: list[MavenModule] = None,
+) -> str:
+    """Generate ``settings.gradle.kts`` content with repository and module configuration.
+
+    When custom repositories are detected (beyond Maven Central), generates
+    ``pluginManagement`` and ``dependencyResolutionManagement`` blocks.
+    Well-known repository URLs (e.g. Spring milestones) are mapped to
+    descriptive names.
+
+    For nested multi-module projects, module includes use colon-separated
+    Gradle paths (e.g. ``include("parent:child")``).
+
+    Args:
+        root_module: The parsed root MavenModule.
+        child_modules: Optional list of all child modules (for repository aggregation
+            and nested module include paths).
+
+    Returns:
+        Complete ``settings.gradle.kts`` file content as a string.
+    """
     lines = []
+    child_modules = child_modules or []
+
+    # Collect all custom repositories from root + children
+    all_repos = list(root_module.repositories)
+    for cm in child_modules:
+        all_repos.extend(cm.repositories)
+
+    # Deduplicate by URL
+    seen_urls = set()
+    unique_repos = []
+    for repo_id, repo_url in all_repos:
+        normalized = repo_url.rstrip("/")
+        if normalized not in seen_urls and "repo1.maven.org" not in normalized and "central" not in repo_id.lower():
+            seen_urls.add(normalized)
+            unique_repos.append((repo_id, normalized))
+
+    has_custom_repos = bool(unique_repos)
+
+    # Generate pluginManagement block (always for multi-module or custom repos)
+    if has_custom_repos or root_module.modules:
+        lines.append("pluginManagement {")
+        lines.append("    repositories {")
+        lines.append("        mavenCentral()")
+        lines.append("        gradlePluginPortal()")
+        for _repo_id, repo_url in unique_repos:
+            lines.append(f'        maven {{ url = uri("{repo_url}") }}')
+        lines.append("    }")
+        lines.append("}")
+        lines.append("")
+
+    # Generate dependencyResolutionManagement block if custom repos exist
+    if has_custom_repos:
+        lines.append("dependencyResolutionManagement {")
+        lines.append("    repositories {")
+        lines.append("        mavenCentral()")
+        for _repo_id, repo_url in unique_repos:
+            lines.append(f'        maven {{ url = uri("{repo_url}") }}')
+        lines.append("    }")
+        lines.append("}")
+        lines.append("")
 
     project_name = root_module.artifact_id
     lines.append(f'rootProject.name = "{project_name}"')
     lines.append("")
 
-    if root_module.modules:
-        for mod_dir in root_module.modules:
-            # Convention: module directory name becomes the Gradle project name
-            lines.append(f'include("{mod_dir}")')
+    if child_modules:
+        for child in child_modules:
+            # Convert filesystem path (a/b) to Gradle include path (a:b)
+            gradle_path = child.source_dir.replace("/", ":")
+            lines.append(f'include("{gradle_path}")')
         lines.append("")
 
     return "\n".join(lines)
@@ -949,12 +1405,27 @@ def generate_settings_gradle_kts(root_module: MavenModule) -> str:
 # ── Gradle wrapper + properties ───────────────────────────────────────────────
 
 def generate_gradle_properties(root_module: MavenModule) -> str:
+    """Generate ``gradle.properties`` content with build performance settings.
+
+    Enables Gradle daemon, parallel execution, and local build caching.
+    Configuration cache is included as a commented-out suggestion since not
+    all plugins support it.
+
+    Custom Maven properties (excluding standard Maven/Java/Kotlin prefixes)
+    are carried over as comments for reference.
+
+    Args:
+        root_module: The root MavenModule (for custom property extraction).
+
+    Returns:
+        Complete ``gradle.properties`` file content as a string.
+    """
     lines = [
         "# Generated by Maven-to-Gradle migration",
         "org.gradle.daemon=true",
         "org.gradle.parallel=true",
         "org.gradle.caching=true",
-        "org.gradle.configuration-cache=true",
+        "# org.gradle.configuration-cache=true  # Enable after verifying all plugins support it",
     ]
     # Carry over relevant Maven properties
     for key, value in root_module.properties.items():
@@ -973,7 +1444,12 @@ def generate_gradle_properties(root_module: MavenModule) -> str:
 # ── Orchestrator ──────────────────────────────────────────────────────────────
 
 def generate_gradle_gitignore_entries() -> str:
-    """Generate .gitignore entries for Gradle build artifacts."""
+    """Generate ``.gitignore`` entries for Gradle build artifacts.
+
+    Returns:
+        A string of gitignore rules covering ``.gradle/``, ``build/``,
+        and the Gradle wrapper JAR exception.
+    """
     return """\
 # Gradle
 .gradle/
@@ -984,11 +1460,69 @@ build/
 """
 
 
-def migrate(project_path: Path, output_path: Optional[Path] = None, dry_run: bool = False, mode: str = "migrate"):
-    """Run the full migration.
+def _parse_modules_recursive(
+    project_path: Path,
+    module_dirs: list[str],
+    parent_path: str = "",
+    _visited: set = None,
+) -> list[MavenModule]:
+    """Recursively parse child modules, handling nested multi-module structures.
+
+    If a child module itself declares ``<modules>``, those nested modules are
+    also parsed and included in the result. Visited paths are tracked to
+    prevent infinite recursion from circular module references.
 
     Args:
-        mode: 'migrate' for full migration, 'overlay' for dual-build (keeps Maven).
+        project_path: Filesystem path to the root project.
+        module_dirs: List of module directory names from the parent's ``<modules>``.
+        parent_path: The relative path prefix for nested modules (e.g. ``"parent-mod"``).
+        _visited: Internal set of visited paths (callers should not set this).
+
+    Returns:
+        Flat list of all MavenModule instances (depth-first), with ``source_dir``
+        set to the relative filesystem path from the project root.
+    """
+    if _visited is None:
+        _visited = set()
+
+    result = []
+    for mod_dir in module_dirs:
+        relative_dir = f"{parent_path}/{mod_dir}" if parent_path else mod_dir
+        # Guard against circular references
+        abs_path = (project_path / relative_dir).resolve()
+        if abs_path in _visited:
+            continue
+        _visited.add(abs_path)
+
+        child_pom = project_path / relative_dir / "pom.xml"
+        if child_pom.exists():
+            child = parse_pom(child_pom)
+            child.source_dir = relative_dir
+            result.append(child)
+            # Recurse into nested modules
+            if child.modules:
+                nested = _parse_modules_recursive(
+                    project_path, child.modules, relative_dir, _visited
+                )
+                result.extend(nested)
+        else:
+            print(f"WARNING: Module '{relative_dir}' has no pom.xml, skipping",
+                  file=sys.stderr)
+    return result
+
+
+def migrate(project_path: Path, output_path: Optional[Path] = None, dry_run: bool = False, mode: str = "migrate"):
+    """Run the full Maven-to-Gradle migration.
+
+    Orchestrates the entire migration pipeline: parses all pom.xml files,
+    generates the version catalog, settings, build files, and properties,
+    then either prints (dry-run) or writes the output.
+
+    Args:
+        project_path: Filesystem path to the Maven project root (containing pom.xml).
+        output_path: Directory to write generated files to. Defaults to ``project_path``.
+        dry_run: If ``True``, prints generated content to stdout instead of writing files.
+        mode: ``"migrate"`` for full migration, ``"overlay"`` for dual-build (keeps Maven).
     """
     root_pom = project_path / "pom.xml"
     if not root_pom.exists():
@@ -1001,17 +1535,10 @@ def migrate(project_path: Path, output_path: Optional[Path] = None, dry_run: boo
 
     is_multi = bool(root_module.modules)
 
-    # Parse child modules
+    # Parse child modules (recursively for nested multi-module projects)
     child_modules = []
     if is_multi:
-        for mod_dir in root_module.modules:
-            child_pom = project_path / mod_dir / "pom.xml"
-            if child_pom.exists():
-                child = parse_pom(child_pom)
-                child.source_dir = mod_dir
-                child_modules.append(child)
-            else:
-                print(f"WARNING: Module '{mod_dir}' has no pom.xml, skipping", file=sys.stderr)
+        child_modules = _parse_modules_recursive(project_path, root_module.modules)
 
     # Build catalog alias lookup
     all_deps = root_module.dependencies + root_module.dep_management
@@ -1029,7 +1556,7 @@ def migrate(project_path: Path, output_path: Optional[Path] = None, dry_run: boo
 
     # Generate files
     catalog_content = build_version_catalog(root_module, child_modules)
-    settings_content = generate_settings_gradle_kts(root_module)
+    settings_content = generate_settings_gradle_kts(root_module, child_modules)
     root_build_content = generate_build_gradle_kts(
         root_module, root_module, catalog_aliases,
         is_root=True, is_multi_module=is_multi, child_modules=child_modules,
@@ -1117,7 +1644,7 @@ def migrate(project_path: Path, output_path: Optional[Path] = None, dry_run: boo
             print(f"  {child.source_dir}/build.gradle.kts")
         print("\n⚠️  Next steps:")
         print("  1. Review generated files and adjust as needed")
-        print("  2. Run: gradle wrapper --gradle-version=8.12")
+        print("  2. Run: gradle wrapper  # uses your installed Gradle version")
         print("  3. Run: ./gradlew build")
         print("  4. Fix any compilation or test issues")
         if is_overlay:
@@ -1129,6 +1656,12 @@ def migrate(project_path: Path, output_path: Optional[Path] = None, dry_run: boo
 
 
 def _write(path: Path, content: str):
+    """Write content to a file, creating parent directories as needed.
+
+    Args:
+        path: Filesystem path to write to.
+        content: File content string (UTF-8 encoded).
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     print(f"  ✓ {path}")
@@ -1137,6 +1670,7 @@ def _write(path: Path, content: str):
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main():
+    """CLI entry point. Parses arguments and delegates to ``migrate()``."""
     parser = argparse.ArgumentParser(
         description="Migrate Maven project to Gradle KTS with version catalogs"
     )

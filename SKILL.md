@@ -90,12 +90,25 @@ See `references/profiles.md` for complete patterns:
 ## Step 5: Verify
 
 ```bash
-gradle wrapper --gradle-version=8.12
+gradle wrapper
 ./gradlew build
 ./gradlew dependencies  # compare with: mvn dependency:tree
 ```
 
 See `references/gotchas.md` section 9 for the full verification checklist.
+
+## Known Limitations
+
+The migration script provides a solid starting point but has these limitations that require manual intervention:
+
+- **Custom Maven plugins** — Plugins without a direct Gradle equivalent are flagged with TODO comments but not converted
+- **Profile conversion** — Maven profiles are identified and commented in the output; actual Gradle equivalent logic must be written manually (see `references/profiles.md`)
+- **Resource filtering** — Maven-style `${property}` resource filtering is not auto-configured; Gradle's `processResources` expand must be set up manually
+- **Publishing configuration** — `maven-publish` plugin setup (POM metadata, repository credentials) is not generated
+- **Concatenated property expressions** — Properties like `${prefix}/${suffix}` with multiple interpolations in a single value are not resolved
+- **Kotlin KSP** — The script detects Kotlin and adds `kotlin("jvm")` but does not auto-detect whether KSP should replace kapt for annotation processing
+- **Repository credentials** — Authenticated repositories from Maven `settings.xml` are not migrated (Gradle uses different credential mechanisms)
+- **Shade/Assembly plugins** — `maven-shade-plugin` and `maven-assembly-plugin` configurations require manual conversion to Gradle's `shadowJar` or custom `Jar` tasks
 
 ## Reference Files
 
