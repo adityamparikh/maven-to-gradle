@@ -88,4 +88,4 @@ python3 scripts/migrate.py /path/to/maven-project --mode overlay
 
 ## License
 
-MIT
+Apache License 2.0
