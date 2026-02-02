@@ -128,6 +128,9 @@ A: The script checks a mapping table of common plugins. Known plugins are conver
 **Q: Why Gradle Kotlin DSL instead of Groovy DSL?**
 A: Kotlin DSL (`build.gradle.kts`) provides compile-time type checking, better IDE auto-completion, and is the default for new Gradle projects. It's the direction Gradle is heading. The version catalog (`libs.versions.toml`) is format-agnostic and works with both DSLs.
 
+**Q: How are Maven BOMs and platform dependencies handled?**
+A: Maven `<dependencyManagement>` BOMs (`type=pom`, `scope=import`) are converted to `implementation(platform(libs.some.bom))` in the build file, with coordinates and versions placed in the version catalog. Non-BOM managed dependencies are used as fallback version sources for dependencies that don't declare an explicit version. One caveat: the script generates `platform()` (which allows transitive versions to override), not `enforcedPlatform()` (which strictly enforces the BOM's versions, closer to Maven's `<dependencyManagement>` semantics). Change to `enforcedPlatform()` manually if you need strict version enforcement.
+
 **Q: How do I run the tests?**
 A: From the `scripts/` directory: `python -m pytest tests/ -v`. The test suite has 192 tests with 100% statement coverage across all source modules. The only dependency is `pytest` (install via `pip install pytest`).
 
