@@ -1,6 +1,7 @@
 ---
 name: maven-to-gradle
 description: Migrate Maven projects to Gradle Kotlin DSL (KTS) with version catalogs (libs.versions.toml). Handles single-module and multi-module projects, Spring Boot parent POM conversion, Maven profile equivalents, and plugin mapping. Use when the user wants to convert a Maven project (pom.xml) to Gradle, migrate from Maven to Gradle, generate build.gradle.kts from pom.xml, set up version catalogs, or convert Maven multi-module projects to Gradle conventions. Also triggered by requests to "switch to Gradle", "convert my build", or "modernize my build system". Supports dual-build overlay mode where Gradle is added alongside Maven without removing it — triggered by "add Gradle to my Maven project", "run both Maven and Gradle", "dual build", or "keep both build systems".
+allowed-tools: Bash(*), Glob(*), Grep(*), Read(*), WebFetch(*), WebSearch(*), mcp__claude_ai_Context7__*, mcp__plugin_context7_context7__*
 ---
 
 # Maven to Gradle KTS Migration
@@ -14,6 +15,23 @@ Migrate Maven projects to Gradle Kotlin DSL with version catalogs, following Gra
 3. **Review and refine** the generated output
 4. **Handle profiles** and custom plugin configurations manually
 5. **Verify** the build compiles and tests pass
+
+## Verify Library and Framework Usage
+
+The model's training data has a knowledge cutoff. When migrating build configurations, **actively verify** that Gradle plugin IDs, DSL syntax, and dependency coordinates are current:
+
+1. **Identify versions** — Check `pom.xml` to determine the exact versions of all dependencies, plugins, and the target Gradle version.
+2. **Look up current documentation** — Use Context7 (`mcp__claude_ai_Context7__resolve-library-id` then `mcp__claude_ai_Context7__query-docs`) to retrieve up-to-date documentation for any library or framework where:
+   - The version is newer than what the model may have been trained on
+   - You are unsure whether a Gradle plugin API, DSL syntax, or configuration has changed
+   - The migration involves plugins with less common Gradle equivalents
+3. **Search the web** — Use `WebSearch` and `WebFetch` to check for:
+   - Latest Gradle plugin portal entries for correct plugin IDs and versions
+   - Breaking changes in Gradle DSL between versions
+   - Current best practices for version catalogs and convention plugins
+4. **Check GitHub** — Use `gh` CLI to check release notes, changelogs, or issues for Gradle plugins when needed (e.g., `gh api repos/{owner}/{repo}/releases/latest`)
+
+**Do not assume** that a plugin ID, DSL syntax, or configuration is correct based solely on model knowledge. When in doubt, look it up.
 
 ## Step 1: Analyze the Project
 
