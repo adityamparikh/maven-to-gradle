@@ -80,7 +80,7 @@ python3 scripts/migrate.py /path/to/maven-project --output /path/to/output
     │   ├── pom_models.py                     # Dataclasses: Dependency, Plugin, MavenModule
     │   ├── pom_parser.py                     # XML parsing of pom.xml files
     │   └── tech_stack_detector.py            # Java/Kotlin/Spring Boot detection
-    └── tests/                                # 192 tests, 100% statement coverage
+    └── tests/                                # Comprehensive unit tests (run with pytest)
         ├── conftest.py                       # Shared pytest fixtures
         ├── test_gradle_file_generator.py     # Version catalog, build files, settings, props
         ├── test_maven_gradle_mappings.py     # Scope + plugin mapping lookups
@@ -132,7 +132,7 @@ A: Kotlin DSL (`build.gradle.kts`) provides compile-time type checking, better I
 A: Maven `<dependencyManagement>` BOMs (`type=pom`, `scope=import`) are converted to `implementation(platform(libs.some.bom))` in the build file, with coordinates and versions placed in the version catalog. Non-BOM managed dependencies are used as fallback version sources for dependencies that don't declare an explicit version. One caveat: the script generates `platform()` (which allows transitive versions to override), not `enforcedPlatform()` (which strictly enforces the BOM's versions, closer to Maven's `<dependencyManagement>` semantics). Change to `enforcedPlatform()` manually if you need strict version enforcement.
 
 **Q: How do I run the tests?**
-A: From the `scripts/` directory: `python -m pytest tests/ -v`. The test suite has 192 tests with 100% statement coverage across all source modules. The only dependency is `pytest` (install via `pip install pytest`).
+A: From the `scripts/` directory: `python -m pytest tests/ -v`. The test suite covers each module (parser, mappings, generator, pipeline, tech-stack detector). The only dependency is `pytest` (install via `pip install pytest`).
 
 ## Requirements
 
