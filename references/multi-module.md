@@ -68,7 +68,9 @@ group = "com.example"
 
 java {
     toolchain {
-        languageVersion = JavaLanguageVersion.of(21)
+        // Recommended: Java 25 (latest LTS). Minimum supported: Java 17.
+        // Match the source project's actual Java version when migrating.
+        languageVersion = JavaLanguageVersion.of(25)
     }
 }
 
@@ -137,7 +139,8 @@ subprojects {
 
     java {
         toolchain {
-            languageVersion = JavaLanguageVersion.of(21)
+            // Recommended: Java 25 (latest LTS). Minimum supported: Java 17.
+            languageVersion = JavaLanguageVersion.of(25)
         }
     }
 
