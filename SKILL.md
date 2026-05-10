@@ -1,50 +1,34 @@
 ---
 name: maven-to-gradle
-description: Migrate Maven projects to Gradle Kotlin DSL (KTS) with version catalogs (libs.versions.toml). Handles single-module and multi-module projects, Spring Boot parent POM conversion, Maven profile equivalents, and plugin mapping. Use when the user wants to convert a Maven project (pom.xml) to Gradle, migrate from Maven to Gradle, generate build.gradle.kts from pom.xml, set up version catalogs, or convert Maven multi-module projects to Gradle conventions. Also triggered by requests to "switch to Gradle", "convert my build", or "modernize my build system". Supports dual-build overlay mode where Gradle is added alongside Maven without removing it — triggered by "add Gradle to my Maven project", "run both Maven and Gradle", "dual build", or "keep both build systems".
+description: Migrates Maven projects to Gradle Kotlin DSL (build.gradle.kts) with version catalogs (libs.versions.toml). Covers single-module and multi-module projects, Spring Boot starter-parent conversion, dependency-scope and BOM mapping, Maven plugin to Gradle plugin translation, and Maven profile equivalents. Also supports a dual-build overlay mode that adds Gradle alongside Maven without removing pom.xml. Triggers on requests to convert pom.xml to Gradle, migrate from Maven to Gradle, generate build.gradle.kts, set up a Gradle version catalog from Maven, modernize a JVM build system, or add Gradle alongside Maven for gradual migration. Does not apply to Gradle-to-Maven conversion, authoring brand-new Gradle projects from scratch with no Maven source, Groovy DSL (build.gradle) authoring unrelated to migration, or non-JVM build tools (npm, Bazel, sbt, Make).
 allowed-tools: Read(*), Glob(*), Grep(*), Bash(python3 scripts/migrate.py:*), Bash(./mvnw:*), Bash(mvn:*), Bash(./gradlew:*), Bash(gradle:*), Bash(gh api:*), WebFetch(*), WebSearch(*), mcp__claude_ai_Context7__*, mcp__plugin_context7_context7__*
 ---
 
 # Maven to Gradle KTS Migration
 
-Migrate Maven projects to Gradle Kotlin DSL with version catalogs, following Gradle conventions.
+## Workflow
 
-## Migration Workflow
+1. **Analyze** the Maven project structure (single vs multi-module, Spring Boot, Kotlin).
+2. **Run** `scripts/migrate.py` to generate baseline Gradle files.
+3. **Review and refine** the generated output.
+4. **Handle profiles** and custom plugin configurations manually.
+5. **Verify** the build compiles and tests pass.
 
-1. **Analyze** the Maven project structure (single vs multi-module, Spring Boot, Kotlin)
-2. **Run** the migration script to generate baseline Gradle files
-3. **Review and refine** the generated output
-4. **Handle profiles** and custom plugin configurations manually
-5. **Verify** the build compiles and tests pass
+## Verify Library and Framework Versions
 
-## Verify Library and Framework Usage
-
-The model's training data has a knowledge cutoff. When migrating build configurations, **actively verify** that Gradle plugin IDs, DSL syntax, and dependency coordinates are current by consulting upstream documentation:
-
-1. **Identify versions** — Check `pom.xml` to determine the exact versions of all dependencies, plugins, and the target Gradle version.
-2. **Look up current documentation** for any library or framework where:
-   - The version is newer than what the model may have been trained on
-   - You are unsure whether a Gradle plugin API, DSL syntax, or configuration has changed
-   - The migration involves plugins with less common Gradle equivalents
-
-   Use whichever documentation lookup mechanism is available in the environment — for example, a documentation-fetch MCP server (such as Context7), a web-fetch tool, or direct browsing of the Gradle Plugin Portal and project release notes.
-3. **Cross-check against upstream** — Verify Gradle plugin portal entries for correct plugin IDs and versions, breaking changes in Gradle DSL between versions, and current best practices for version catalogs and convention plugins.
-4. **Check GitHub release notes** for Gradle plugins when in doubt (e.g., via `gh api repos/{owner}/{repo}/releases/latest` if the `gh` CLI is available).
-
-**Do not assume** that a plugin ID, DSL syntax, or configuration is correct based solely on model knowledge. When in doubt, look it up.
+Plugin IDs, DSL syntax, and dependency coordinates change between Gradle versions. Before finalizing output, look up current docs (Context7 MCP, web fetch, Gradle Plugin Portal, or `gh api repos/{owner}/{repo}/releases/latest`) for any plugin or framework whose version is newer than the model's training data, or whose Gradle equivalent is uncommon. Do not assume a plugin ID or DSL form is correct from memory.
 
 ## Step 1: Analyze the Project
 
-Before running the script, examine the Maven project:
-
-- Read the root `pom.xml` to identify: packaging type (jar/pom/war), parent POM, modules, profiles
-- For multi-module projects, check each child `pom.xml` for inter-module dependencies
-- Identify special plugins that need manual conversion (see references/plugin-mappings.md)
+- Read the root `pom.xml`: packaging type (jar/pom/war), parent POM, modules, profiles.
+- For multi-module projects, check each child `pom.xml` for inter-module dependencies.
+- Identify special plugins that need manual conversion (see `references/plugin-mappings.md`).
 
 ## Step 2: Run the Migration Script
 
-Two modes are available:
+Two modes:
 
-**Full migration** (default) — generates Gradle files, suggests removing Maven after verification:
+**Full migration** (default) — generates Gradle files; suggests removing Maven after verification:
 ```bash
 python3 scripts/migrate.py <path-to-maven-project> --dry-run
 ```
