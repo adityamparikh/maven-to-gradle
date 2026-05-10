@@ -27,7 +27,9 @@
 ```kotlin
 java {
     toolchain {
-        languageVersion = JavaLanguageVersion.of(21)
+        // Recommended: Java 25 (latest LTS). Minimum supported: Java 17.
+        // When migrating, match the source project's actual Java version.
+        languageVersion = JavaLanguageVersion.of(25)
     }
 }
 ```
