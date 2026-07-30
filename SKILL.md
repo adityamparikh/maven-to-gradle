@@ -34,6 +34,19 @@ Plugin IDs, DSL syntax, and dependency coordinates change between Gradle version
 
 ## Step 2: Run the Migration Script
 
+> **Gradle ships its own converter.** `gradle init --type pom` detects `pom.xml` and
+> generates `settings.gradle(.kts)` + `build.gradle(.kts)`, importing repositories and
+> the Java/War/Maven-Publish plugins. Use it as a baseline or a sanity check. This
+> skill's script goes further: version catalogs (`libs.versions.toml`), Spring Boot
+> BOM splitting, Maven profile equivalents, and multi-module convention plugins —
+> none of which `gradle init` produces.
+>
+> **Gradle 9 changed things this skill's snippets predate:** the Groovy DSL moved to
+> Groovy 4.0 (behavioural changes), the embedded Kotlin went to 2.2 (affects Kotlin
+> DSL scripts), and Gradle's own API now uses JSpecify rather than JSR-305
+> annotations. If a snippet here misbehaves on 9.x, check the Gradle 9 upgrade guide
+> before assuming the snippet is wrong.
+
 Two modes:
 
 **Full migration** (default) — generates Gradle files; suggests removing Maven after verification:

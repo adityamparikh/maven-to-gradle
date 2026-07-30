@@ -37,7 +37,7 @@ spring-boot-starter-web = { ... }
 libs.spring.boot.starter.web
 ```
 
-**Avoid aliases starting with `bundles`, `versions`, or `plugins`** — these are reserved prefixes.
+**Avoid aliases starting with `bundles`, `versions`, `plugins`, `extensions`, `class`, or `convention`** — all are reserved by Gradle's version-catalog generator.
 
 **BOM dependencies** must still declare version in the catalog, even if managed:
 ```toml
