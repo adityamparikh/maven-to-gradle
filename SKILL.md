@@ -6,6 +6,14 @@ allowed-tools: Read(*), Glob(*), Grep(*), Bash(python3 scripts/migrate.py:*), Ba
 
 # Maven to Gradle KTS Migration
 
+## Currency
+
+**Last verified: 2026-07** (Gradle 9.6.x era). Facts here age. If the answer hinges on a
+version-sensitive fact — a Gradle version, a plugin ID or coordinate, a version-catalog rule, a DSL idiom — and time has passed
+since the stamp above, spot-check current release notes or the tool's own source
+before asserting it. When current docs disagree with this file, **the docs win**:
+say so and note the line is stale.
+
 ## Workflow
 
 1. **Analyze** the Maven project structure (single vs multi-module, Spring Boot, Kotlin).
@@ -91,7 +99,7 @@ See `references/profiles.md` for complete patterns:
 ## Step 5: Verify
 
 ```bash
-gradle wrapper --gradle-version=8.12
+gradle wrapper --gradle-version=9.6.1   # check https://gradle.org/releases/ for current stable
 ./gradlew build
 ./gradlew dependencies  # compare with: mvn dependency:tree
 ```
