@@ -12,7 +12,7 @@
 | maven-pmd-plugin | pmd | pmd |
 | spotbugs-maven-plugin | com.github.spotbugs | spotbugs |
 | spotless-maven-plugin | com.diffplug.spotless | spotless |
-| maven-shade-plugin | com.github.johnrengelman.shadow | shadow |
+| maven-shade-plugin | com.gradleup.shadow | shadow (the old `com.github.johnrengelman.shadow` ID still resolves via a shim but is frozen — no new releases) |
 | maven-war-plugin | war | (built-in) |
 | flyway-maven-plugin | org.flywaydb.flyway | flyway |
 | openapi-generator-maven-plugin | org.openapi.generator | openapi-generator |

@@ -32,7 +32,7 @@ PLUGIN_ID_MAP = {
     "maven-pmd-plugin": "pmd",
     "spotbugs-maven-plugin": "com.github.spotbugs",
     "spotless-maven-plugin": "com.diffplug.spotless",
-    "maven-shade-plugin": "com.github.johnrengelman.shadow",
+    "maven-shade-plugin": "com.gradleup.shadow",
     "maven-war-plugin": "war",
     "maven-ear-plugin": "ear",
     "maven-application-plugin": "application",

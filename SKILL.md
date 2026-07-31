@@ -6,6 +6,14 @@ allowed-tools: Read(*), Glob(*), Grep(*), Bash(python3 scripts/migrate.py:*), Ba
 
 # Maven to Gradle KTS Migration
 
+## Currency
+
+**Last verified: 2026-07** (Gradle 9.6.x era). Facts here age. If the answer hinges on a
+version-sensitive fact — a Gradle version, a plugin ID or coordinate, a version-catalog rule, a DSL idiom — and time has passed
+since the stamp above, spot-check current release notes or the tool's own source
+before asserting it. When current docs disagree with this file, **the docs win**:
+say so and note the line is stale.
+
 ## Workflow
 
 1. **Analyze** the Maven project structure (single vs multi-module, Spring Boot, Kotlin).
@@ -25,6 +33,19 @@ Plugin IDs, DSL syntax, and dependency coordinates change between Gradle version
 - Identify special plugins that need manual conversion (see `references/plugin-mappings.md`).
 
 ## Step 2: Run the Migration Script
+
+> **Gradle ships its own converter.** `gradle init --type pom` detects `pom.xml` and
+> generates `settings.gradle(.kts)` + `build.gradle(.kts)`, importing repositories and
+> the Java/War/Maven-Publish plugins. Use it as a baseline or a sanity check. This
+> skill's script goes further: version catalogs (`libs.versions.toml`), Spring Boot
+> BOM splitting, Maven profile equivalents, and multi-module convention plugins —
+> none of which `gradle init` produces.
+>
+> **Gradle 9 changed things this skill's snippets predate:** the Groovy DSL moved to
+> Groovy 4.0 (behavioural changes), the embedded Kotlin went to 2.2 (affects Kotlin
+> DSL scripts), and Gradle's own API now uses JSpecify rather than JSR-305
+> annotations. If a snippet here misbehaves on 9.x, check the Gradle 9 upgrade guide
+> before assuming the snippet is wrong.
 
 Two modes:
 
@@ -91,7 +112,7 @@ See `references/profiles.md` for complete patterns:
 ## Step 5: Verify
 
 ```bash
-gradle wrapper --gradle-version=8.12
+gradle wrapper --gradle-version=9.6.1   # check https://gradle.org/releases/ for current stable
 ./gradlew build
 ./gradlew dependencies  # compare with: mvn dependency:tree
 ```
